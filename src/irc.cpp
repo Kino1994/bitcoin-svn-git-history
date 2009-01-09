@@ -136,30 +136,14 @@ bool RecvUntil(SOCKET hSocket, const char* psz1, const char* psz2=NULL, const ch
     }
 }
 
-bool Wait(int nSeconds)
-{
-    if (fShutdown)
-        return false;
-    printf("Waiting %d seconds to reconnect to IRC\n", nSeconds);
-    for (int i = 0; i < nSeconds; i++)
-    {
-        if (fShutdown)
-            return false;
-        Sleep(1000);
-    }
-    return true;
-}
 
 
+
+bool fRestartIRCSeed = false;
 
 void ThreadIRCSeed(void* parg)
 {
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
-    int nErrorWait = 30;
-    int nRetryWait = 10;
-
-
-    while (!fShutdown)
+    loop
     {
         struct hostent* phostent = gethostbyname("chat.freenode.net");
         CAddress addrConnect(*(u_long*)phostent->h_addr_list[0], htons(6667));
@@ -168,19 +152,13 @@ void ThreadIRCSeed(void* parg)
         if (!ConnectSocket(addrConnect, hSocket))
         {
             printf("IRC connect failed\n");
-            if (Wait(nErrorWait += 60))
-                continue;
-            else
-                return;
+            return;
         }
 
         if (!RecvUntil(hSocket, "Found your hostname", "using your IP address instead", "Couldn't look up your hostname"))
         {
             closesocket(hSocket);
-            if (Wait(nErrorWait += 60))
-                continue;
-            else
-                return;
+            return;
         }
 
         string strMyName = EncodeAddress(addrLocalHost);
@@ -188,27 +166,28 @@ void ThreadIRCSeed(void* parg)
         if (!addrLocalHost.IsRoutable())
             strMyName = strprintf("x%u", GetRand(1000000000));
 
-
         Send(hSocket, strprintf("NICK %s\r", strMyName.c_str()).c_str());
         Send(hSocket, strprintf("USER %s 8 * : %s\r", strMyName.c_str(), strMyName.c_str()).c_str());
 
         if (!RecvUntil(hSocket, " 004 "))
         {
             closesocket(hSocket);
-            if (Wait(nErrorWait += 60))
-                continue;
-            else
-                return;
+            return;
         }
         Sleep(500);
 
         Send(hSocket, "JOIN #bitcoin\r");
         Send(hSocket, "WHO #bitcoin\r");
 
-        string strLine;
-        while (!fShutdown && RecvLineIRC(hSocket, strLine))
+        while (!fRestartIRCSeed)
         {
-            if (strLine.empty() || strLine.size() > 900 || strLine[0] != ':')
+            string strLine;
+            if (fShutdown || !RecvLineIRC(hSocket, strLine))
+            {
+                closesocket(hSocket);
+                return;
+            }
+            if (strLine.empty() || strLine[0] != ':')
                 continue;
             printf("IRC %s\n", strLine.c_str());
 
@@ -228,7 +207,7 @@ void ThreadIRCSeed(void* parg)
                 printf("GOT WHO: [%s]  ", pszName);
             }
 
-            if (vWords[1] == "JOIN" && vWords[0].size() > 1)
+            if (vWords[1] == "JOIN")
             {
                 // :username!username@50000007.F000000B.90000002.IP JOIN :#channelname
                 strcpy(pszName, vWords[0].c_str() + 1);
@@ -252,12 +231,10 @@ void ThreadIRCSeed(void* parg)
                     printf("decode failed\n");
                 }
             }
-
         }
-        closesocket(hSocket);
 
-        if (!Wait(nRetryWait += 10))
-            return;
+        fRestartIRCSeed = false;
+        closesocket(hSocket);
     }
 }
 
